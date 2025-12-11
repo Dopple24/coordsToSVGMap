@@ -3,8 +3,8 @@ import requests
 from dataclasses import dataclass, field
 from typing import List
 
-start = (48.8145328, 17.0831953) #south, west
-end = (49.2576317, 17.7464947) #north, east
+start = (49.7251436, 11.9092547) #south, west
+end = (50.4799014, 12.9414544) #north, east
 
 lat0 = (start[0] + end[0]) / 2
 lon0 = (start[1] + end[1]) / 2
@@ -22,7 +22,6 @@ class Road:
     nodes: List[tuple[float, float]] = field(default_factory=list)
     color: str = "black"
 
-
 # --------------------------- HIGHWAY STROKE ---------------------------
 
 def set_road_width(obj) -> float:
@@ -36,6 +35,120 @@ def set_road_width(obj) -> float:
         case "residential":  return 1
     return 0
 
+# --------------------------- FETCH -------------------------------------
+
+def fetchAll(s, w, n, e):
+    query = f"""
+    [out:json][timeout:60];
+    (
+      way["highway"]({s},{w},{n},{e});
+      way["railway"]({s},{w},{n},{e});
+      way["waterway"]({s},{w},{n},{e});
+      way["natural"="water"]({s},{w},{n},{e});
+      way["water"]({s},{w},{n},{e});
+      way["landuse"]({s},{w},{n},{e});
+      node["place"]({s},{w},{n},{e});
+    );
+    out geom;
+    """
+
+    r = requests.get("https://overpass-api.de/api/interpreter", params={"data": query})
+    r.raise_for_status()
+
+    elements = r.json().get("elements", [])
+    if not isinstance(elements, list):
+        return {
+            "highways": [],
+            "railways": [],
+            "rivers": [],
+            "lakes": [],
+            "landuse": [],
+            "cities": []
+        }
+
+    highways = []
+    railways = []
+    rivers = []
+    lakes = []
+    landuse = []
+    cities = []
+
+    for elem in elements:
+
+        # ---- Skip broken elements ----
+        if not isinstance(elem, dict):
+            continue
+        if "tags" not in elem:
+            continue
+
+        tags = elem["tags"]
+
+        # ---- If geometry exists, project it ----
+        if "geometry" in elem:
+            projected = []
+            for pt in elem["geometry"]:
+                if "lat" not in pt or "lon" not in pt:
+                    continue
+                lat, lon = pt["lat"], pt["lon"]
+                x = (lon - lon0) * math.cos(math.radians(lat0)) * R * SCALE
+                y = (lat - lat0) * R * -1 * SCALE
+                projected.append((round(x, 3), round(y, 3)))
+
+            elem["projected"] = projected
+
+        # ---- Categorize ----
+        if "highway" in tags:
+            highways.append(elem)
+
+        elif "railway" in tags:
+            railways.append(elem)
+
+        elif "waterway" in tags:
+            rivers.append(elem)
+
+        elif tags.get("natural") == "water" or "water" in tags:
+            lakes.append(elem)
+
+        elif "landuse" in tags:
+            landuse.append(elem)
+
+        elif "place" in tags:
+            cities.append(elem)
+
+    return {
+        "highways": highways,
+        "railways": railways,
+        "rivers": rivers,
+        "lakes": lakes,
+        "landuse": landuse,
+        "cities": cities
+    }
+
+
+# ------------------------ FETCH RAILROAD DATA --------------------------
+
+def getRailways(south, west, north, east):
+    query = f"""
+    [out:json][timeout:25];
+    way["railway"~"rail"]({south},{west},{north},{east});
+    out geom;
+    """
+    response = requests.get("https://overpass-api.de/api/interpreter", params={"data": query})
+    print(response.status_code)
+
+    elements = response.json().get("elements", [])
+
+    rails = []
+    for element in elements:
+        projected_nodes = []
+        for pt in element["geometry"]:
+            lat, lon = pt["lat"], pt["lon"]
+            x = (lon - lon0) * math.cos(math.radians(lat0)) * R * SCALE
+            y = (lat - lat0) * R * -1 * SCALE
+            projected_nodes.append((round(x,3), round(y,3)))
+        rails.append(projected_nodes)
+    return rails
+
 # -------------------------- FETCH RIVER DATA ---------------------------
 
 def getRivers(south, west, north, east):
@@ -45,6 +158,8 @@ def getRivers(south, west, north, east):
     out geom;
     """
     response = requests.get("https://overpass-api.de/api/interpreter", params={"data": query})
+    print(response.status_code)
+
     elements = response.json().get("elements", [])
 
     rivers = []
@@ -67,6 +182,32 @@ def getLakes(south, west, north, east):
     out geom;
     """
     response = requests.get("https://overpass-api.de/api/interpreter", params={"data": query})
+    print(response.status_code)
+
+    elements = response.json().get("elements", [])
+
+    lakes = []
+    for element in elements:
+        projected_nodes = []
+        for pt in element["geometry"]:
+            lat, lon = pt["lat"], pt["lon"]
+            x = (lon - lon0) * math.cos(math.radians(lat0)) * R * SCALE
+            y = (lat - lat0) * R * -1 * SCALE
+            projected_nodes.append((round(x,3), round(y,3)))
+        lakes.append(projected_nodes)
+    return lakes
+
+# ------------------- Fetch residential areas -------------------
+
+def getResAreas(south, west, north, east):
+    query = f"""
+    [out:json][timeout:25];
+    way["landuse"~"residential|industrial|education"]({south},{west},{north},{east});
+    out geom;
+    """
+    response = requests.get("https://overpass-api.de/api/interpreter", params={"data": query})
+    print(response.status_code)
+
     elements = response.json().get("elements", [])
 
     lakes = []
@@ -82,6 +223,35 @@ def getLakes(south, west, north, east):
 
 
 # --------------------------- FETCH ROAD DATA ---------------------------
+
+def processRoads(highway_elements):
+    black = []
+    white = []
+
+    for elem in highway_elements:
+        tags = elem["tags"]
+        geom = elem["projected"]
+        base = set_road_width({"tags": tags})
+
+        if base == 0:
+            continue
+
+        start = geom[0]
+        end = geom[-1]
+
+        new_black = Road(start=start, end=end, thickness=base,
+                         color="black", nodes=geom.copy())
+        new_white = Road(start=start, end=end, thickness=max(base - 1, 0.7),
+                         color="white", nodes=geom.copy())
+
+        if not merge_road_into_list(new_black, black):
+            black.append(new_black)
+
+        if not merge_road_into_list(new_white, white):
+            white.append(new_white)
+
+    return black + white
+
 
 def merge_road_into_list(new_road, road_list):
     """
@@ -127,13 +297,15 @@ def merge_road_into_list(new_road, road_list):
 
 def getMotorways(south, west, north, east):
     query = f"""
-    [out:json][timeout:25];
+    [out:json][timeout:60];
     way["highway"]({south},{west},{north},{east});
     out geom;
     """
 
     response = requests.get("https://overpass-api.de/api/interpreter",
                              params={"data": query})
+    print(response.status_code)
+
     data = response.json()
 
     black_roads = []
@@ -201,6 +373,20 @@ def roadsToSVG(roads, filename="curve.svg"):
                 f'stroke-width="{road.thickness}" fill="none" />'
             )
 
+def citiesToSVG(cities, filename="curve.svg"):
+    with open(filename, "a", encoding="utf-8") as f:
+        for elem in cities:
+            name = elem["tags"].get("name", "")
+            lat = elem["lat"]
+            lon = elem["lon"]
+
+            x = (lon - lon0) * math.cos(math.radians(lat0)) * R * SCALE
+            y = (lat - lat0) * R * -1 * SCALE
+
+            f.write(
+                f'<rect width="18.6" height="18.6" x="{x}" y="{y}" fill="pink" />'
+                f'<text x="{x}" y="{y - 12}" fill="black" font-size="16">{name}</text>'
+            )
 # ------------------- Write rivers as SVG paths -------------------
 
 def riversToSVG(rivers, filename="curve.svg"):
@@ -224,6 +410,20 @@ def lakesToSVG(lakes, filename="curve.svg"):
             f.write(f'<polygon points="{points_str}" fill="blue" stroke="blue" stroke-width="2"/>\n')
 
 
+def railwaysToSVG(rails, filename="curve.svg"):
+    with open(filename, "a", encoding="utf-8") as f:
+        for rail in rails:
+            if not rail:
+                continue
+            path_str = f"M {rail[0][0]} {rail[0][1]} "
+            for x, y in rail[1:]:
+                path_str += f"L {x} {y} "
+            f.write(f'<path d="{path_str}" stroke="black" stroke-width="3.2" fill="none" />\n')
+            f.write(f'<path d="{path_str}" stroke="white" stroke-width="3" fill="none" />\n')
+            f.write(f'<path d="{path_str}" stroke="black" stroke-width="3" fill="none" stroke-dasharray="10,10" />\n')
+
+
+
 # --------------------------- CITIES ---------------------------
 
 def getCities(south, west, north, east):
@@ -241,6 +441,7 @@ def getCities(south, west, north, east):
                             params={"data": query})
     data = response.json()
 
+
     with open("curve.svg", "a", encoding="utf-8") as f:
         for element in data["elements"]:
             name = element["tags"].get("name")
@@ -251,20 +452,38 @@ def getCities(south, west, north, east):
             y = (lat - lat0) * R * -1 * SCALE
 
             f.write(
-                f'<rect width="18.6" height="18.6" x="{x}" y="{y}" fill="pink" />'
+                f'<rect width="18.6" height="18.6" x="{x}" y="{y}" fill="green" />'
                 f'<text x="{x}" y="{y - 12}" fill="black" font-size="16">{name}</text>'
             )
 
 
 # --------------------------- RUN ---------------------------
+roads_raw, railways_raw, rivers_raw, lakes_raw, landuse_raw, cities_raw = fetchAll(
+    start[0], start[1], end[0], end[1]
+)
 
 initializeSVG()
-roads = getMotorways(start[0], start[1], end[0], end[1])
+
+# Roads
+roads = processRoads(roads_raw)         # NEW helper (scroll down)
 roadsToSVG(roads)
-getCities(start[0], start[1], end[0], end[1])
-rivers = getRivers(start[0], start[1], end[0], end[1])
+
+# Cities
+citiesToSVG(cities_raw)                 # NEW helper (scroll down)
+
+# Rivers
+rivers = [elem["projected"] for elem in rivers_raw]
 riversToSVG(rivers)
-lakes = getLakes(start[0], start[1], end[0], end[1])
+
+# Lakes
+lakes = [elem["projected"] for elem in lakes_raw]
 lakesToSVG(lakes)
+
+# Railways
+rails = [elem["projected"] for elem in railways_raw]
+railwaysToSVG(rails)
+
+
+
 closeSVG()
 
