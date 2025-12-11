@@ -25,7 +25,7 @@ class Road:
 
 # --------------------------- HIGHWAY STROKE ---------------------------
 
-def setStroke(obj) -> float:
+def set_road_width(obj) -> float:
     match obj["tags"]["highway"]:
         case "motorway":     return 6.2
         case "trunk":        return 5.7
@@ -35,6 +35,50 @@ def setStroke(obj) -> float:
         case "unclassified": return 1
         case "residential":  return 1
     return 0
+
+# -------------------------- FETCH RIVER DATA ---------------------------
+
+def getRivers(south, west, north, east):
+    query = f"""
+    [out:json][timeout:25];
+    way["waterway"~"river|rapids|dam|security_lock"]({south},{west},{north},{east});
+    out geom;
+    """
+    response = requests.get("https://overpass-api.de/api/interpreter", params={"data": query})
+    elements = response.json().get("elements", [])
+
+    rivers = []
+    for element in elements:
+        projected_nodes = []
+        for pt in element["geometry"]:
+            lat, lon = pt["lat"], pt["lon"]
+            x = (lon - lon0) * math.cos(math.radians(lat0)) * R * SCALE
+            y = (lat - lat0) * R * -1 * SCALE
+            projected_nodes.append((round(x,3), round(y,3)))
+        rivers.append(projected_nodes)
+    return rivers
+
+# ------------------- Fetch lakes/ponds/reservoirs -------------------
+
+def getLakes(south, west, north, east):
+    query = f"""
+    [out:json][timeout:25];
+    way["water"~"lake|oxbow|basin|canal|harbour"]({south},{west},{north},{east});
+    out geom;
+    """
+    response = requests.get("https://overpass-api.de/api/interpreter", params={"data": query})
+    elements = response.json().get("elements", [])
+
+    lakes = []
+    for element in elements:
+        projected_nodes = []
+        for pt in element["geometry"]:
+            lat, lon = pt["lat"], pt["lon"]
+            x = (lon - lon0) * math.cos(math.radians(lat0)) * R * SCALE
+            y = (lat - lat0) * R * -1 * SCALE
+            projected_nodes.append((round(x,3), round(y,3)))
+        lakes.append(projected_nodes)
+    return lakes
 
 
 # --------------------------- FETCH ROAD DATA ---------------------------
@@ -97,7 +141,7 @@ def getMotorways(south, west, north, east):
 
     for element in data["elements"]:
         geom = element["geometry"]
-        base = setStroke(element)
+        base = set_road_width(element)
         if base == 0:
             continue
 
@@ -132,6 +176,7 @@ def getMotorways(south, west, north, east):
 
 
 # --------------------------- SVG OUTPUT ---------------------------
+
 def initializeSVG(filename="curve.svg"):
     with open(filename, "w", encoding="utf-8") as f:
         f.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1000 -1000 2000 2000">')
@@ -155,6 +200,29 @@ def roadsToSVG(roads, filename="curve.svg"):
                 f'<path d="{path_str}" stroke="{road.color}" '
                 f'stroke-width="{road.thickness}" fill="none" />'
             )
+
+# ------------------- Write rivers as SVG paths -------------------
+
+def riversToSVG(rivers, filename="curve.svg"):
+    with open(filename, "a", encoding="utf-8") as f:
+        for river in rivers:
+            if not river:
+                continue
+            path_str = f"M {river[0][0]} {river[0][1]} "
+            for x, y in river[1:]:
+                path_str += f"L {x} {y} "
+            f.write(f'<path d="{path_str}" stroke="blue" stroke-width="3" fill="none"/>\n')
+
+# ------------------- Write lakes as SVG polygons -------------------
+
+def lakesToSVG(lakes, filename="curve.svg"):
+    with open(filename, "a", encoding="utf-8") as f:
+        for lake in lakes:
+            if not lake:
+                continue
+            points_str = " ".join(f"{x},{y}" for x, y in lake)
+            f.write(f'<polygon points="{points_str}" fill="blue" stroke="blue" stroke-width="2"/>\n')
+
 
 # --------------------------- CITIES ---------------------------
 
@@ -183,7 +251,7 @@ def getCities(south, west, north, east):
             y = (lat - lat0) * R * -1 * SCALE
 
             f.write(
-                f'<rect width="18.6" height="18.6" x="{x}" y="{y}" fill="blue" />'
+                f'<rect width="18.6" height="18.6" x="{x}" y="{y}" fill="pink" />'
                 f'<text x="{x}" y="{y - 12}" fill="black" font-size="16">{name}</text>'
             )
 
@@ -194,5 +262,9 @@ initializeSVG()
 roads = getMotorways(start[0], start[1], end[0], end[1])
 roadsToSVG(roads)
 getCities(start[0], start[1], end[0], end[1])
+rivers = getRivers(start[0], start[1], end[0], end[1])
+riversToSVG(rivers)
+lakes = getLakes(start[0], start[1], end[0], end[1])
+lakesToSVG(lakes)
 closeSVG()
 
